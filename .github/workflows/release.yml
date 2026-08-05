@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml']
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+        with:
+          toolchain: stable
+          cache: false
+
+      - name: Build release binary
+        if: steps.check_tag.outputs.exists == 'false'
+        run: cargo build --release --locked --verbose
+
+      - name: Prepare binary
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          mkdir -p dist
+          cp "target/release/$REPO_NAME" "dist/$REPO_NAME-linux-x64"
+          chmod +x "dist/$REPO_NAME-linux-x64"
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: gh release create "$TAG" "dist/$REPO_NAME-linux-x64" --generate-notes --latest
