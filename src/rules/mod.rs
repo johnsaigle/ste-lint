@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn reports_representative_ste_guidance() {
-        let text = "The robust valve has been opened in order to start heating; clearly, it works. One. Two. Three.";
+        let text = "The robust valve has been opened by using the procedure; clearly, it works. One. Two. Three.";
         let document = Document::new(text.to_owned(), false);
         let findings = check(&document, &config(), 100);
         let codes: Vec<_> = findings.iter().map(|finding| finding.code).collect();
@@ -134,5 +134,151 @@ mod tests {
         let findings = check(&document, &config(), 100);
 
         assert!(!findings.iter().any(|finding| finding.code == "STE005"));
+    }
+
+    #[test]
+    fn skips_ing_forms_inside_technical_tokens() {
+        let text = "Read CONTRIBUTING.md. Open src/logging/mod.rs. Call logging::init. \
+                    Set logging_enabled. Fetch https://example.com/logging. Install @scope/logging. \
+                    Read logging.rs and build-logging.sh.";
+        let document = Document::new(text.to_owned(), false);
+        let findings = check(&document, &config(), 100);
+        let ing: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.code == "STE005")
+            .map(|finding| &text[finding.range.clone()])
+            .collect();
+
+        assert!(ing.is_empty(), "unexpected -ing findings: {ing:?}");
+    }
+
+    #[test]
+    fn flags_a_sentence_final_ing_form() {
+        let document = Document::new("We are testing.".to_owned(), false);
+        let findings = check(&document, &config(), 100);
+
+        assert!(findings.iter().any(|finding| finding.code == "STE005"));
+    }
+
+    #[test]
+    fn flags_verb_slot_ing_forms() {
+        for text in [
+            "The system is logging events.",
+            "We are testing.",
+            "Open the file by using the menu.",
+            "Improve the result by logging the events.",
+            "Stop the engine before opening the valve.",
+            "Testing the valve takes time.",
+            "Using the API, call the endpoint.",
+            "The valve is opening slowly.",
+            "The tool has been running for hours.",
+        ] {
+            let document = Document::new(text.to_owned(), false);
+            let findings = check(&document, &config(), 100);
+
+            assert!(
+                findings.iter().any(|finding| finding.code == "STE005"),
+                "missing STE005 in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn skips_ing_words_in_noun_slots() {
+        for text in [
+            "The type is string.",
+            "A string is required.",
+            "The value is a string.",
+            "Update the mapping table.",
+            "The logging mode is off.",
+            "Check the padding value.",
+            "Set the encoding to utf-8.",
+            "The meeting starts at noon.",
+            "The building is closed.",
+            "Read the warning label.",
+            "The spring is loose.",
+            "Nothing changed.",
+            "Store the binding in the cache.",
+            "The ceiling panel is open.",
+            "Processing occurs in batches.",
+            "The casing is steel.",
+            "This is a smoking area.",
+            "The permitted values are string and int.",
+            "The default type is string or int.",
+            "The value is string.",
+            "Nothing, really, works here.",
+            "Warning labels, then stop.",
+            "Morning, noon, and night are shift names.",
+            "Mapping entries, then save.",
+            "There is nothing to configure.",
+            "It is nothing to worry about.",
+            "In string, the backslash is removed.",
+            "For string, numeric, and file comparisons.",
+            "Please contact us in writing.",
+        ] {
+            let document = Document::new(text.to_owned(), false);
+            let findings = check(&document, &config(), 100);
+
+            assert!(
+                !findings.iter().any(|finding| finding.code == "STE005"),
+                "unexpected STE005 in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_treat_a_wrapped_line_start_as_a_clause_start() {
+        let text = "The grammar checks are conservative heuristics. Treat each\nwarning as a prompt for review, not proof of an error.";
+        let document = Document::new(text.to_owned(), false);
+        let findings = check(&document, &config(), 100);
+
+        assert!(!findings.iter().any(|finding| finding.code == "STE005"));
+    }
+
+    #[test]
+    fn reports_an_ambiguous_copula_ing_form_for_review() {
+        // `reads are blocking operations` and `the system is logging events`
+        // have the same shape. English cannot separate the adjective reading
+        // from the progressive reading without a lexicon, so the frame reports
+        // the word for review instead of guessing.
+        let document = Document::new("Local reads are blocking operations.".to_owned(), false);
+        let findings = check(&document, &config(), 100);
+
+        assert!(findings.iter().any(|finding| finding.code == "STE005"));
+    }
+
+    #[test]
+    fn skips_a_clause_final_progressive_without_a_pronoun_subject() {
+        let document = Document::new("The valve is opening.".to_owned(), false);
+        let findings = check(&document, &config(), 100);
+
+        assert!(!findings.iter().any(|finding| finding.code == "STE005"));
+    }
+
+    #[test]
+    fn skips_verb_findings_inside_technical_tokens() {
+        for text in [
+            "The value is cached.data here.",
+            "The job is queued.json here.",
+            "The build has been cached.now",
+        ] {
+            let document = Document::new(text.to_owned(), false);
+            let findings = check(&document, &config(), 100);
+
+            assert!(
+                !findings
+                    .iter()
+                    .any(|finding| finding.code == "STE003" || finding.code == "STE004"),
+                "unexpected verb finding in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_verb_findings_in_prose() {
+        let document = Document::new("The valve is opened by the system.".to_owned(), false);
+        let findings = check(&document, &config(), 100);
+
+        assert!(findings.iter().any(|finding| finding.code == "STE003"));
     }
 }

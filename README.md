@@ -30,6 +30,20 @@ and closing quotes or parentheses can follow sentence punctuation. Dotted
 technical tokens such as `CONTRIBUTING.md` and `docs.rs` count as one word.
 Markdown headings and list items establish structural boundaries.
 
+Grammar checks skip technical tokens. Filenames, paths, URLs, imports, and
+identifiers are written by tools and conventions rather than as prose, so
+`src/logging/mod.rs`, `logging::init`, `logging_enabled`, `@scope/logging`, and
+`build-logging.sh` are not reported even though they contain an `-ing` form.
+
+The `-ing` check reports a word only when a closed-class word puts it in a verb
+position. It reports `logging` in `is logging events`, `by logging the events`,
+and `Testing the valve takes time.`, and it ignores the same spelling in a noun
+position such as `the mapping table` or `a string is required`. A preposition
+followed by an `-ing` word without a clear object (`by logging`) is ambiguous,
+so the check leaves it alone. A copula followed by an `-ing` word and a bare
+noun, as in `reads are blocking operations`, is also ambiguous in English, so
+that form is reported for review.
+
 ## Install
 
 ```console

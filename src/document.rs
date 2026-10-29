@@ -18,6 +18,7 @@ pub struct Document {
     line_starts: Vec<usize>,
     sentences: Vec<Range<usize>>,
     paragraphs: Vec<Range<usize>>,
+    technical: Vec<Range<usize>>,
 }
 
 impl Document {
@@ -30,12 +31,14 @@ impl Document {
         let line_starts = line_starts(&source);
         let paragraphs = paragraph_ranges(&visible, markdown);
         let sentences = sentence_ranges(&visible, &paragraphs);
+        let technical = technical_spans(&visible);
         Self {
             source,
             visible,
             line_starts,
             sentences,
             paragraphs,
+            technical,
         }
     }
 
@@ -90,10 +93,93 @@ impl Document {
             .filter(|sentence| sentence.start >= paragraph.start && sentence.end <= paragraph.end)
             .count()
     }
+
+    /// True when `range` belongs to a filename, path, URL, or identifier.
+    ///
+    /// Grammar checks skip these spans because the spelling inside them is
+    /// decided by a tool or a convention, not by prose.
+    pub fn in_technical_token(&self, range: &Range<usize>) -> bool {
+        self.overlaps_technical(range)
+    }
+
+    /// True when any technical token overlaps `range`.
+    ///
+    /// Rules that match phrases rather than single words use this form, so a
+    /// match such as `is cached.data` is skipped as a whole.
+    pub fn overlaps_technical(&self, range: &Range<usize>) -> bool {
+        if range.start >= range.end {
+            return false;
+        }
+        let index = self
+            .technical
+            .partition_point(|span| span.end <= range.start);
+        self.technical
+            .get(index)
+            .is_some_and(|span| span.start < range.end)
+    }
 }
 
 pub fn words(text: &str) -> impl Iterator<Item = &str> {
     WORD.find_iter(text).map(|matched| matched.as_str())
+}
+
+fn is_token_char(character: char) -> bool {
+    character.is_alphanumeric()
+        || matches!(
+            character,
+            '_' | '-' | '.' | '/' | '\\' | ':' | '@' | '#' | '~'
+        )
+}
+
+fn has_extension(token: &str) -> bool {
+    token.rfind('.').is_some_and(|dot| {
+        let extension = &token[dot + 1..];
+        !token[..dot].is_empty()
+            && (1..=5).contains(&extension.len())
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+    })
+}
+
+fn is_technical_token(token: &str) -> bool {
+    token.contains("://")
+        || token.contains("::")
+        || token.contains(['/', '\\', '@', '#', '~', '_'])
+        || has_extension(token)
+}
+
+fn technical_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (offset, character) in text.char_indices() {
+        if is_token_char(character) {
+            start.get_or_insert(offset);
+        } else if let Some(token_start) = start.take() {
+            push_technical_span(text, token_start, offset, &mut spans);
+        }
+    }
+    if let Some(token_start) = start {
+        push_technical_span(text, token_start, text.len(), &mut spans);
+    }
+    spans
+}
+
+fn push_technical_span(text: &str, start: usize, end: usize, spans: &mut Vec<Range<usize>>) {
+    let run = &text[start..end];
+    let trimmed = run
+        .trim_start_matches(['(', '[', '{', '<', '"', '\'', '*'])
+        .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '*']);
+
+    if trimmed.is_empty() || !is_technical_token(trimmed) {
+        return;
+    }
+
+    let leading = run.len()
+        - run
+            .trim_start_matches(['(', '[', '{', '<', '"', '\'', '*'])
+            .len();
+    spans.push(start + leading..start + leading + trimmed.len());
 }
 
 fn line_starts(text: &str) -> Vec<usize> {
@@ -355,6 +441,58 @@ mod tests {
     fn accepts_closing_delimiters_after_sentence_punctuation() {
         let document = Document::new("Use this option.) Then stop.".to_owned(), false);
         assert_eq!(document.sentences().len(), 2);
+    }
+
+    #[test]
+    fn recognizes_technical_tokens() {
+        for (source, token) in [
+            ("Edit CONTRIBUTING.md.", "CONTRIBUTING.md"),
+            ("Open src/logging/mod.rs.", "logging"),
+            ("Run https://example.com/logging now.", "logging"),
+            ("Set logging_enabled to true.", "logging"),
+            ("Call logging::init now.", "logging"),
+            ("Install @scope/logging now.", "logging"),
+            ("Read logging.rs and stop.", "logging"),
+            ("Run build-logging.sh now.", "logging"),
+        ] {
+            let document = Document::new(source.to_owned(), false);
+            let start = source.find(token).expect("token is in the source");
+            let range = start..start + token.len();
+            assert!(
+                document.in_technical_token(&range),
+                "{token:?} in {source:?} should be technical"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_treat_prose_words_as_technical_tokens() {
+        for (source, token) in [
+            ("We are testing.", "testing"),
+            ("The value is a string.", "string"),
+            ("Read the file (logging).", "logging"),
+        ] {
+            let document = Document::new(source.to_owned(), false);
+            let start = source.find(token).expect("token is in the source");
+            let range = start..start + token.len();
+            assert!(
+                !document.in_technical_token(&range),
+                "{token:?} in {source:?} should be prose"
+            );
+        }
+    }
+
+    #[test]
+    fn finds_technical_tokens_that_overlap_a_phrase() {
+        let source = "The value is cached.data here.";
+        let document = Document::new(source.to_owned(), false);
+        let start = source.find("is cached").expect("phrase is in the source");
+        let end = source
+            .find(" here")
+            .expect("trailing word is in the source");
+
+        assert!(document.overlaps_technical(&(start..end)));
+        assert!(!document.overlaps_technical(&(0..3)));
     }
 
     #[test]
