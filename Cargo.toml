@@ -1,6 +1,6 @@
 [package]
 name = "ste-lint"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A bounded, STE-inspired prose linter"
 license = "MIT"
