@@ -1,6 +1,6 @@
 # ste-lint
 
-`ste-lint` is a fast, bounded command-line prose linter inspired by
+`ste-lint` is a fast command-line prose linter inspired by
 [Simplified Technical English](https://en.wikipedia.org/wiki/Simplified_Technical_English).
 It helps technical writers and LLM-assisted workflows find text that is harder
 to read than necessary.
@@ -91,19 +91,8 @@ configuration error.
 The default extensions are `md`, `markdown`, `mdown`, `mkdn`, `txt`, `rst`,
 `adoc`, and `asciidoc`. Use `--extensions` to replace this list. Markdown code
 fences, inline code, and link destinations are excluded from prose checks.
-
-## Resource Bounds
-
-All inputs are bounded. Defaults limit traversal to 10,000 files and 32 levels,
-each file to 2 MiB, output to 1,000 diagnostics, and worker threads to at most
-16. Processing occurs in fixed-size batches. The product of the worker count and
-maximum file size cannot exceed 128 MiB. The CLI also enforces hard ceilings.
 Symbolic links are not followed. Git ignore rules and hidden-file filtering are
 enabled by default.
-
-The implementation uses a bounded Rayon pool rather than an async runtime.
-Local filesystem reads are blocking operations, and bounded data parallelism is
-simpler and more appropriate for processing independent files.
 
 ## References
 
