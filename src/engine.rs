@@ -18,6 +18,8 @@ use crate::{
 
 struct FileResult {
     path: String,
+    /// `None` for standard input.
+    source: Option<std::path::PathBuf>,
     document: Document,
 }
 
@@ -40,8 +42,13 @@ pub fn lint(inputs: Vec<Input>, config: &Config) -> anyhow::Result<Report> {
         for result in results {
             let result = result?;
             let remaining = config.max_diagnostics.saturating_sub(diagnostics.len());
-            let findings =
-                rules::check(&result.document, config, remaining.saturating_add(1).max(1));
+            let filter = config.filter_for(result.source.as_deref());
+            let findings = rules::check(
+                &result.document,
+                config,
+                &filter,
+                remaining.saturating_add(1).max(1),
+            );
             if findings.len() > remaining {
                 truncated = true;
             }
@@ -71,11 +78,13 @@ fn load(input: &Input, max_bytes: u64) -> anyhow::Result<FileResult> {
             let markdown = is_markdown(path);
             Ok(FileResult {
                 path: path.display().to_string(),
+                source: Some(path.clone()),
                 document: Document::new(source, markdown),
             })
         }
         Input::Stdin => Ok(FileResult {
             path: "<stdin>".to_owned(),
+            source: None,
             document: Document::new(read_bounded(io::stdin().lock(), max_bytes)?, false),
         }),
     }

@@ -5,6 +5,38 @@ use regex::Regex;
 static WORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[[:alpha:]]+(?:['.-][[:alpha:]]+)*").expect("built-in word pattern is valid")
 });
+static HTML_COMMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<!--.*?(?:-->|\z)").expect("built-in HTML comment pattern is valid")
+});
+static DIRECTIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<!--\s*ste-lint-(disable-next-line|disable|enable)\b([^>]*?)-->")
+        .expect("built-in directive pattern is valid")
+});
+static HTML_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+        .expect("built-in HTML tag pattern is valid")
+});
+static AUTOLINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]+|[^<>\s@]+@[^<>\s]+)>")
+        .expect("built-in autolink pattern is valid")
+});
+static ENTITY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});")
+        .expect("built-in entity pattern is valid")
+});
+static IMAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"!\[[^\]\n]*\](?:\[[^\]\n]*\])?").expect("built-in image pattern is valid")
+});
+static REFERENCE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\]\[[^\]\n]*\]").expect("built-in reference label pattern is valid")
+});
+static LINK_DEFINITION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^ {0,3}\[([^\]\n]+)\]:").expect("built-in link definition pattern is valid")
+});
+static TABLE_DELIMITER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$")
+        .expect("built-in table delimiter pattern is valid")
+});
 
 const ABBREVIATIONS: &[&str] = &[
     "approx.", "cf.", "dept.", "dr.", "e.g.", "etc.", "fig.", "figs.", "i.e.", "inc.", "jr.",
@@ -19,16 +51,31 @@ pub struct Document {
     sentences: Vec<Range<usize>>,
     paragraphs: Vec<Range<usize>>,
     technical: Vec<Range<usize>>,
+    suppressions: Vec<Suppression>,
+}
+
+/// Lines where inline directives turn off some or all rules.
+#[derive(Debug)]
+struct Suppression {
+    /// One-based line numbers, end exclusive.
+    lines: Range<usize>,
+    /// `None` means every rule.
+    codes: Option<Vec<String>>,
 }
 
 impl Document {
     pub fn new(source: String, markdown: bool) -> Self {
-        let visible = if markdown {
-            mask_markdown(&source)
-        } else {
-            source.clone()
-        };
         let line_starts = line_starts(&source);
+        // Read directives after code is masked, so an example directive in a
+        // code fence or a code span has no effect.
+        let (visible, suppressions) = if markdown {
+            let code_masked = mask_markdown_code(&source);
+            let suppressions = suppressions(&code_masked, &line_starts);
+            (mask_markdown_markup(code_masked), suppressions)
+        } else {
+            let suppressions = suppressions(&source, &line_starts);
+            (mask_directives(&source), suppressions)
+        };
         let paragraphs = paragraph_ranges(&visible, markdown);
         let sentences = sentence_ranges(&visible, &paragraphs);
         let technical = technical_spans(&visible);
@@ -39,7 +86,24 @@ impl Document {
             sentences,
             paragraphs,
             technical,
+            suppressions,
         }
+    }
+
+    /// True when an inline directive turns off `code` at `offset`.
+    pub fn is_suppressed(&self, offset: usize, code: &str) -> bool {
+        if self.suppressions.is_empty() {
+            return false;
+        }
+        let (line, _) = self.location(offset);
+        self.suppressions.iter().any(|suppression| {
+            suppression.lines.contains(&line)
+                && suppression.codes.as_ref().is_none_or(|codes| {
+                    codes
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(code))
+                })
+        })
     }
 
     pub fn visible(&self) -> &str {
@@ -198,6 +262,11 @@ fn paragraph_ranges(text: &str, markdown: bool) -> Vec<Range<usize>> {
             if let Some(paragraph_start) = start.take() {
                 ranges.push(paragraph_start..offset);
             }
+        } else if markdown && trimmed.starts_with('|') {
+            if let Some(paragraph_start) = start.take() {
+                ranges.push(paragraph_start..offset);
+            }
+            push_table_cells(line, offset, &mut ranges);
         } else if markdown && is_markdown_block_start(trimmed) {
             if let Some(paragraph_start) = start.take() {
                 ranges.push(paragraph_start..offset);
@@ -216,6 +285,29 @@ fn paragraph_ranges(text: &str, markdown: bool) -> Vec<Range<usize>> {
         ranges.push(paragraph_start..text.len());
     }
     ranges
+}
+
+/// Push each cell of a Markdown table row as its own paragraph.
+///
+/// A row is a set of separate values, not one sentence, so the cells must not
+/// be joined for the length checks.
+fn push_table_cells(line: &str, base: usize, ranges: &mut Vec<Range<usize>>) {
+    let mut cell_start = 0;
+    let mut previous = '\0';
+    for (offset, character) in line.char_indices() {
+        if character == '|' && previous != '\\' {
+            push_cell(line, base, cell_start..offset, ranges);
+            cell_start = offset + 1;
+        }
+        previous = character;
+    }
+    push_cell(line, base, cell_start..line.len(), ranges);
+}
+
+fn push_cell(line: &str, base: usize, cell: Range<usize>, ranges: &mut Vec<Range<usize>>) {
+    if !line[cell.clone()].trim().is_empty() {
+        ranges.push(base + cell.start..base + cell.end);
+    }
 }
 
 fn sentence_ranges(text: &str, paragraphs: &[Range<usize>]) -> Vec<Range<usize>> {
@@ -330,37 +422,171 @@ fn push_trimmed(text: &str, range: Range<usize>, ranges: &mut Vec<Range<usize>>)
     }
 }
 
-fn mask_markdown(source: &str) -> String {
+/// Mask front matter, code fences, and code spans.
+fn mask_markdown_code(source: &str) -> String {
     let mut bytes = source.as_bytes().to_vec();
+    let front_matter = front_matter_end(source);
+    blank(&mut bytes, 0..front_matter);
+
     let mut fenced = false;
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
+    let mut offset = front_matter;
+    for line in source[front_matter..].split_inclusive('\n') {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             blank(&mut bytes, offset..offset + line.len());
             fenced = !fenced;
         } else if fenced {
             blank(&mut bytes, offset..offset + line.len());
+        }
+        offset += line.len();
+    }
+    mask_inline_code(&mut bytes);
+    String::from_utf8(bytes).expect("masking preserves UTF-8")
+}
+
+/// Mask Markdown and HTML markup in text that has no code left in it.
+fn mask_markdown_markup(text: String) -> String {
+    let mut bytes = text.into_bytes();
+    // Comments can span lines, so mask them before the line-based passes.
+    // Code is blank at this point, so a `<!--` inside code does not start a
+    // comment.
+    mask_pattern(&mut bytes, &HTML_COMMENT);
+
+    let text = String::from_utf8(bytes.clone()).expect("masking preserves UTF-8");
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if TABLE_DELIMITER.is_match(line) {
+            blank(&mut bytes, offset..offset + line.len());
+        } else if let Some(definition) = LINK_DEFINITION.captures(line) {
+            // A footnote definition keeps its prose. A link reference
+            // definition holds only a label, a destination, and a title.
+            let label = definition.get(1).expect("label group exists");
+            let end = if label.as_str().starts_with('^') {
+                definition.get(0).expect("match exists").end()
+            } else {
+                line.len()
+            };
+            blank(&mut bytes, offset..offset + end);
         } else {
-            mask_inline_code(&mut bytes, line, offset);
             mask_link_targets(&mut bytes, line, offset);
         }
         offset += line.len();
     }
+    for pattern in [&IMAGE, &REFERENCE_LABEL, &AUTOLINK, &HTML_TAG, &ENTITY] {
+        mask_pattern(&mut bytes, pattern);
+    }
     String::from_utf8(bytes).expect("masking preserves UTF-8")
 }
 
-fn mask_inline_code(bytes: &mut [u8], line: &str, base: usize) {
-    let mut opening = None;
-    for (offset, character) in line.char_indices() {
-        if character == '`' {
-            if let Some(start) = opening.take() {
-                blank(bytes, base + start..base + offset + 1);
-            } else {
-                opening = Some(offset);
+/// Mask inline directive comments in formats other than Markdown.
+fn mask_directives(source: &str) -> String {
+    let mut bytes = source.as_bytes().to_vec();
+    mask_pattern(&mut bytes, &DIRECTIVE);
+    String::from_utf8(bytes).expect("masking preserves UTF-8")
+}
+
+fn mask_pattern(bytes: &mut [u8], pattern: &Regex) {
+    let text = std::str::from_utf8(bytes).expect("masking preserves UTF-8");
+    let ranges: Vec<_> = pattern.find_iter(text).map(|found| found.range()).collect();
+    for range in ranges {
+        blank(bytes, range);
+    }
+}
+
+/// Return the end offset of YAML (`---`) or TOML (`+++`) front matter.
+fn front_matter_end(source: &str) -> usize {
+    let mut lines = source.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return 0;
+    };
+    let fence = first.trim_end();
+    if fence != "---" && fence != "+++" {
+        return 0;
+    }
+    let mut offset = first.len();
+    for line in lines {
+        offset += line.len();
+        let trimmed = line.trim_end();
+        if trimmed == fence || (fence == "---" && trimmed == "...") {
+            return offset;
+        }
+    }
+    0
+}
+
+/// Parse `ste-lint-disable`, `ste-lint-enable`, and
+/// `ste-lint-disable-next-line` comments.
+///
+/// A directive without codes applies to every rule. `ste-lint-enable` without
+/// codes ends every open region. With codes, it ends only the regions that
+/// were opened with the same codes.
+fn suppressions(source: &str, line_starts: &[usize]) -> Vec<Suppression> {
+    let mut suppressions = Vec::new();
+    let mut open: Vec<(usize, Option<Vec<String>>)> = Vec::new();
+    for directive in DIRECTIVE.captures_iter(source) {
+        let whole = directive.get(0).expect("match exists");
+        let line = line_starts.partition_point(|start| *start <= whole.start());
+        let end_line = line_starts.partition_point(|start| *start < whole.end());
+        let codes = parse_codes(&directive[2]);
+        match &directive[1] {
+            "disable-next-line" => suppressions.push(Suppression {
+                lines: end_line + 1..end_line + 2,
+                codes,
+            }),
+            "disable" => open.push((line, codes)),
+            _ => {
+                let (closed, still_open): (Vec<_>, Vec<_>) =
+                    open.into_iter().partition(|(_, open_codes)| {
+                        codes.is_none() || open_codes.as_ref() == codes.as_ref()
+                    });
+                open = still_open;
+                suppressions.extend(closed.into_iter().map(|(start, codes)| Suppression {
+                    lines: start..line + 1,
+                    codes,
+                }));
             }
         }
     }
+    suppressions.extend(open.into_iter().map(|(start, codes)| Suppression {
+        lines: start..usize::MAX,
+        codes,
+    }));
+    suppressions
+}
+
+fn parse_codes(text: &str) -> Option<Vec<String>> {
+    let codes: Vec<String> = text
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|code| !code.is_empty())
+        .map(str::to_ascii_uppercase)
+        .collect();
+    (!codes.is_empty() && !codes.iter().any(|code| code == "*" || code == "ALL")).then_some(codes)
+}
+
+/// Mask code spans. A span can wrap onto the next line, as in CommonMark,
+/// but it cannot cross a blank line.
+fn mask_inline_code(bytes: &mut [u8]) {
+    let text = std::str::from_utf8(bytes).expect("masking preserves UTF-8");
+    let mut spans = Vec::new();
+    let mut opening: Option<usize> = None;
+    for (offset, character) in text.char_indices() {
+        if character != '`' {
+            continue;
+        }
+        match opening.take() {
+            Some(start) if !crosses_blank_line(&text[start..offset]) => {
+                spans.push(start..offset + 1);
+            }
+            _ => opening = Some(offset),
+        }
+    }
+    for span in spans {
+        blank(bytes, span);
+    }
+}
+
+fn crosses_blank_line(text: &str) -> bool {
+    text.split('\n').skip(1).any(|line| line.trim().is_empty())
 }
 
 fn mask_link_targets(bytes: &mut [u8], line: &str, base: usize) {
@@ -505,5 +731,88 @@ mod tests {
             .map(|sentence| document.word_count(sentence))
             .collect();
         assert_eq!(counts, [1, 4, 2, 2]);
+    }
+
+    #[test]
+    fn masks_markdown_structures_that_are_not_prose() {
+        let source = "---\ntitle: The value is ignored by tools.\n---\n\
+            <!-- The comment is ignored by tools. -->\n\
+            [ci]: https://example.com/ci\n\
+            [![Build][badge]][ci] <img src=\"x.png\"> <https://example.com>\n\
+            Use it &mdash; now.\n";
+        let document = Document::new(source.to_owned(), true);
+        let visible = document.visible();
+        assert_eq!(visible.len(), source.len());
+        for hidden in [
+            "title", "comment", "example", "Build", "badge", "img", "mdash",
+        ] {
+            assert!(
+                !visible.contains(hidden),
+                "{hidden:?} is visible: {visible:?}"
+            );
+        }
+        assert!(visible.contains("Use it"));
+    }
+
+    #[test]
+    fn masks_code_spans_that_wrap_lines() {
+        let document = Document::new("Use `is then\nreturned` now.".to_owned(), true);
+        assert!(!document.visible().contains("returned"));
+
+        let document = Document::new("A ` tick.\n\nThe value is `x`.".to_owned(), true);
+        assert!(document.visible().contains("tick"));
+        assert!(!document.visible().contains('x'));
+    }
+
+    #[test]
+    fn keeps_footnote_definition_prose() {
+        let document = Document::new("[^1]: The note text.\n".to_owned(), true);
+        assert!(!document.visible().contains("[^1]"));
+        assert!(document.visible().contains("The note text."));
+    }
+
+    #[test]
+    fn treats_table_cells_as_separate_paragraphs() {
+        let source = "| Name | Description |\n| --- | --- |\n| `a` | One two three |\n";
+        let document = Document::new(source.to_owned(), true);
+        let cells: Vec<_> = document
+            .paragraphs()
+            .iter()
+            .map(|paragraph| document.visible()[paragraph.clone()].trim())
+            .collect();
+        assert_eq!(cells, ["Name", "Description", "One two three"]);
+    }
+
+    #[test]
+    fn applies_inline_directives() {
+        let source = "<!-- ste-lint-disable-next-line STE003 -->\nOne.\nTwo.\n\
+            <!-- ste-lint-disable -->\nThree.\n<!-- ste-lint-enable -->\nFour.\n\
+            <!-- ste-lint-disable STE006, STE007 -->\nFive.\n";
+        let document = Document::new(source.to_owned(), false);
+        let offset = |text: &str| source.find(text).unwrap();
+
+        assert!(document.is_suppressed(offset("One"), "STE003"));
+        assert!(!document.is_suppressed(offset("One"), "STE001"));
+        assert!(!document.is_suppressed(offset("Two"), "STE003"));
+        assert!(document.is_suppressed(offset("Three"), "STE001"));
+        assert!(!document.is_suppressed(offset("Four"), "STE001"));
+        assert!(document.is_suppressed(offset("Five"), "STE007"));
+        assert!(!document.is_suppressed(offset("Five"), "STE003"));
+        assert!(!document.visible().contains("ste-lint"));
+    }
+
+    #[test]
+    fn ignores_directives_inside_code() {
+        let source = "```markdown\n<!-- ste-lint-disable -->\n```\n\
+            `<!-- ste-lint-disable-next-line -->`\nOne.\n";
+        let document = Document::new(source.to_owned(), true);
+        assert!(!document.is_suppressed(source.find("One").unwrap(), "STE001"));
+    }
+
+    #[test]
+    fn ends_only_matching_regions() {
+        let source = "<!-- ste-lint-disable STE003 -->\n<!-- ste-lint-enable STE006 -->\nOne.\n";
+        let document = Document::new(source.to_owned(), false);
+        assert!(document.is_suppressed(source.find("One").unwrap(), "STE003"));
     }
 }

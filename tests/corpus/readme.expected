@@ -1,0 +1,28 @@
+# Labeled true positives for readme.md, one per line: LINE CODE.
+# The linter output is compared with this list. A finding that is not
+# listed is a false positive. A listed entry that is not found is a false
+# negative.
+# mode: description
+13 STE002
+14 STE003
+14 STE003
+15 STE003
+20 STE003
+20 STE003
+21 STE003
+22 STE003
+29 STE003
+32 STE006
+34 STE006
+38 STE006
+38 STE007
+40 STE006
+44 STE002
+44 STE005
+45 STE004
+48 STE004
+49 STE005
+50 STE005
+52 STE005
+56 STE001
+56 STE003

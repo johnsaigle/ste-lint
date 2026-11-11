@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::rules::Confidence;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -14,6 +16,7 @@ pub struct Diagnostic {
     pub end_column: usize,
     pub source_line: String,
     pub severity: Severity,
+    pub confidence: Confidence,
     pub code: &'static str,
     pub message: String,
     pub help: Option<String>,

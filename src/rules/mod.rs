@@ -1,26 +1,109 @@
+#[cfg(test)]
+mod corpus;
 mod length;
 mod style;
 mod verbs;
 
-use std::ops::Range;
+use std::{collections::HashSet, ops::Range};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{config::Config, diagnostic::Diagnostic, document::Document};
 
 const MAX_SOURCE_LINE_CHARS: usize = 240;
 
+/// Every rule code, in output order.
+pub const CODES: [&str; 7] = [
+    "STE001", "STE002", "STE003", "STE004", "STE005", "STE006", "STE007",
+];
+
+/// How likely a finding is to be a real problem.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug)]
 pub struct Finding {
     pub range: Range<usize>,
     pub code: &'static str,
+    pub confidence: Confidence,
     pub message: String,
     pub help: Option<String>,
 }
 
-pub fn check(document: &Document, config: &Config, remaining: usize) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    length::check(document, config, &mut findings, remaining);
-    style::check(document, &mut findings, remaining);
-    verbs::check(document, &mut findings, remaining);
+/// Decide which findings a file reports.
+#[derive(Debug, Clone)]
+pub struct Filter {
+    pub enabled: HashSet<&'static str>,
+    pub min_confidence: Confidence,
+}
+
+impl Filter {
+    #[cfg(test)]
+    pub fn all() -> Self {
+        Self {
+            enabled: CODES.into_iter().collect(),
+            min_confidence: Confidence::Low,
+        }
+    }
+
+    pub fn is_enabled(&self, code: &str) -> bool {
+        self.enabled.contains(code)
+    }
+}
+
+/// Collect findings up to a limit, after filters and inline directives.
+///
+/// Filtering happens here, before the limit applies, so suppressed findings
+/// never take the place of reported ones.
+pub struct Sink<'a> {
+    document: &'a Document,
+    filter: &'a Filter,
+    limit: usize,
+    findings: Vec<Finding>,
+}
+
+impl Sink<'_> {
+    /// Add a finding. Return false when the sink is full.
+    pub fn push(&mut self, finding: Finding) -> bool {
+        if !self.filter.is_enabled(finding.code)
+            || finding.confidence < self.filter.min_confidence
+            || self
+                .document
+                .is_suppressed(finding.range.start, finding.code)
+        {
+            return true;
+        }
+        if self.findings.len() >= self.limit {
+            return false;
+        }
+        self.findings.push(finding);
+        true
+    }
+}
+
+pub fn check(
+    document: &Document,
+    config: &Config,
+    filter: &Filter,
+    remaining: usize,
+) -> Vec<Finding> {
+    let mut sink = Sink {
+        document,
+        filter,
+        limit: remaining,
+        findings: Vec::new(),
+    };
+    length::check(document, config, &mut sink);
+    style::check(document, &mut sink);
+    verbs::check(document, config, &mut sink);
+    let mut findings = sink.findings;
     findings.sort_by_key(|finding| (finding.range.start, finding.code));
     findings.truncate(remaining);
     findings
@@ -41,10 +124,20 @@ pub fn into_diagnostic(path: &str, document: &Document, finding: Finding) -> Dia
         },
         source_line,
         severity: crate::diagnostic::Severity::Warning,
+        confidence: finding.confidence,
         code: finding.code,
         message: finding.message,
         help: finding.help,
     }
+}
+
+/// Return the word at the start of `rest`, after any whitespace.
+fn next_word(rest: &str) -> Option<&str> {
+    let trimmed = rest.trim_start();
+    let end = trimmed
+        .find(|character: char| !(character.is_alphabetic() || character == '-'))
+        .unwrap_or(trimmed.len());
+    (end > 0).then(|| &trimmed[..end])
 }
 
 fn truncate_source_line(line: &str) -> String {
@@ -56,35 +149,21 @@ fn truncate_source_line(line: &str) -> String {
     rendered
 }
 
-fn push_bounded(findings: &mut Vec<Finding>, finding: Finding, limit: usize) -> bool {
-    if findings.len() >= limit {
-        return false;
-    }
-    findings.push(finding);
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf};
+    use crate::{cli::Mode, config::Config, document::Document};
 
-    use crate::{cli::Format, config::Config, document::Document};
+    use super::{Confidence, Filter, check as check_with};
 
-    use super::check;
+    fn check(document: &Document, config: &Config, remaining: usize) -> Vec<super::Finding> {
+        check_with(document, config, &Filter::all(), remaining)
+    }
 
     fn config() -> Config {
         Config {
-            paths: vec![PathBuf::from("test.txt")],
             max_sentence_words: 5,
             max_paragraph_sentences: 2,
-            max_files: 10,
-            max_file_bytes: 1_024,
-            max_depth: 4,
-            max_diagnostics: 100,
-            jobs: 1,
-            extensions: HashSet::from(["txt".to_owned()]),
-            no_ignore: false,
-            format: Format::Text,
+            ..Config::default()
         }
     }
 
@@ -280,5 +359,155 @@ mod tests {
         let findings = check(&document, &config(), 100);
 
         assert!(findings.iter().any(|finding| finding.code == "STE003"));
+    }
+
+    fn findings_for(text: &str, code: &str) -> Vec<String> {
+        let document = Document::new(text.to_owned(), false);
+        check(&document, &config(), 100)
+            .into_iter()
+            .filter(|finding| finding.code == code)
+            .map(|finding| text[finding.range].to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn skips_non_passive_be_phrases() {
+        for text in [
+            "It is a hidden field.",
+            "It is the token.",
+            "This is open source.",
+            "It is even faster now.",
+            "The value is between one and ten.",
+            "The goal is speed when it counts.",
+            "The API is deprecated.",
+            "The value is unchanged.",
+            "Rust's UTF-8 is guaranteed-valid.",
+        ] {
+            assert!(
+                findings_for(text, "STE003").is_empty(),
+                "unexpected STE003 in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flags_passives_with_gaps_and_irregular_participles() {
+        for (text, span) in [
+            ("The flag is set by the caller.", "is set"),
+            ("The binary is built nightly.", "is built"),
+            ("The test is run nightly.", "is run"),
+            ("A copy is made first.", "is made"),
+            ("The result is then returned.", "is then returned"),
+            ("It is being targeted.", "is being targeted"),
+            (
+                "They are all manually controlled.",
+                "are all manually controlled",
+            ),
+            ("It should be dual licensed.", "be dual licensed"),
+            ("The value isn't used.", "isn't used"),
+            ("The file was rewritten.", "was rewritten"),
+        ] {
+            assert_eq!(findings_for(text, "STE003"), [span], "in {text:?}");
+        }
+    }
+
+    #[test]
+    fn rates_passive_confidence_by_agent_and_mode() {
+        let rate = |text: &str, mode: Mode| {
+            let document = Document::new(text.to_owned(), false);
+            let mut settings = config();
+            settings.mode = mode;
+            check(&document, &settings, 100)
+                .into_iter()
+                .find(|finding| finding.code == "STE003")
+                .map(|finding| finding.confidence)
+        };
+        assert_eq!(
+            rate("The cache is cleared by the scheduler.", Mode::Description),
+            Some(Confidence::High)
+        );
+        assert_eq!(
+            rate("It is used by default.", Mode::Description),
+            Some(Confidence::Low)
+        );
+        assert_eq!(
+            rate("It is used by default.", Mode::Procedure),
+            Some(Confidence::Medium)
+        );
+    }
+
+    #[test]
+    fn separates_perfect_verbs_from_noun_phrases() {
+        for text in [
+            "It has read access.",
+            "We have mixed results.",
+            "It has a broken link.",
+        ] {
+            assert!(
+                findings_for(text, "STE004").is_empty(),
+                "unexpected STE004 in {text:?}"
+            );
+        }
+        for (text, span) in [
+            ("It has read the file.", "has read"),
+            ("There have been bugs.", "have been"),
+            ("It has not been tuned.", "has not been tuned"),
+            ("We haven't verified it.", "haven't verified"),
+        ] {
+            assert_eq!(findings_for(text, "STE004"), [span], "in {text:?}");
+        }
+    }
+
+    #[test]
+    fn skips_a_number_of_with_a_unit() {
+        assert!(findings_for("Wait a number of seconds.", "STE006").is_empty());
+        assert_eq!(
+            findings_for("A number of users asked.", "STE006"),
+            ["A number of"]
+        );
+    }
+
+    #[test]
+    fn reports_only_semicolons_that_join_clauses() {
+        for text in [
+            "TL;DR: it works.",
+            "Use it &mdash; now.",
+            "- Set the flag;\n- Run the tool.",
+            "Run x = 1;",
+        ] {
+            assert!(
+                findings_for(text, "STE007").is_empty(),
+                "unexpected STE007 in {text:?}"
+            );
+        }
+        assert_eq!(findings_for("Stop; then start.", "STE007"), [";"]);
+    }
+
+    #[test]
+    fn applies_rule_selection_and_confidence() {
+        let text = "Clearly, it is used; stop.";
+        let document = Document::new(text.to_owned(), false);
+        let codes = |filter: &Filter| {
+            check_with(&document, &config(), filter, 100)
+                .into_iter()
+                .map(|finding| finding.code)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(codes(&Filter::all()), ["STE006", "STE003", "STE007"]);
+        let mut filter = Filter::all();
+        filter.enabled.remove("STE006");
+        assert_eq!(codes(&filter), ["STE003", "STE007"]);
+        filter.min_confidence = Confidence::Medium;
+        assert_eq!(codes(&filter), ["STE007"]);
+    }
+
+    #[test]
+    fn suppressed_findings_do_not_use_the_limit() {
+        let text = "<!-- ste-lint-disable STE006 -->\nClearly. Clearly.\n<!-- ste-lint-enable -->\nStop; then start.";
+        let document = Document::new(text.to_owned(), false);
+        let findings = check(&document, &config(), 1);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "STE007");
     }
 }

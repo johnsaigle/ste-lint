@@ -1,0 +1,22 @@
+# Labeled true positives for procedure.md. See readme.expected.
+# mode: procedure
+3 STE005
+4 STE003
+5 STE007
+6 STE003
+7 STE003
+8 STE004
+8 STE003
+10 STE003
+10 STE003
+12 STE006
+12 STE006
+13 STE006
+14 STE003
+16 STE003
+17 STE003
+25 STE006
+# Known limit: line 27, `is closed`, is a state, not an action. The linter
+# reports it, so it counts as a false positive.
+# Known limit: the linter does not detect `get` passives.
+28 STE003

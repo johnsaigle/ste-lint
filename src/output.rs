@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::{cli::Format, diagnostic::Report};
+use crate::{cli::Format, diagnostic::Report, rules::Confidence};
 
 pub fn write(report: &Report, format: Format) -> anyhow::Result<()> {
     let stdout = io::stdout();
@@ -25,9 +25,14 @@ fn write_text(output: &mut impl Write, report: &Report) -> io::Result<()> {
             writeln!(output, "! {}", diagnostic.path)?;
             previous_path = Some(diagnostic.path.as_str());
         }
+        let confidence = match diagnostic.confidence {
+            Confidence::High => "",
+            Confidence::Medium => " (medium confidence)",
+            Confidence::Low => " (low confidence)",
+        };
         writeln!(
             output,
-            "  Warning line {} [{}]: {}",
+            "  Warning line {} [{}]{confidence}: {}",
             diagnostic.line, diagnostic.code, diagnostic.message
         )?;
         for line in diagnostic.source_line.lines() {
@@ -63,7 +68,10 @@ fn write_text(output: &mut impl Write, report: &Report) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::diagnostic::{Diagnostic, Report, Severity};
+    use crate::{
+        diagnostic::{Diagnostic, Report, Severity},
+        rules::Confidence,
+    };
 
     use super::write_text;
 
@@ -77,6 +85,7 @@ mod tests {
                 end_column: 14,
                 source_line: "The valve is opened.".to_owned(),
                 severity: Severity::Warning,
+                confidence: Confidence::High,
                 code: "STE003",
                 message: "possible passive voice".to_owned(),
                 help: Some("Name the actor.".to_owned()),
@@ -104,6 +113,7 @@ mod tests {
                 end_column: 2,
                 source_line: "First line\nsecond line.".to_owned(),
                 severity: Severity::Warning,
+                confidence: Confidence::High,
                 code: "STE001",
                 message: "long sentence".to_owned(),
                 help: None,

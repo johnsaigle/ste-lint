@@ -72,27 +72,19 @@ fn supported(path: &std::path::Path, config: &Config) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
     use tempfile::tempdir;
 
-    use crate::{cli::Format, config::Config};
+    use crate::config::Config;
 
     use super::{Input, discover};
 
     fn config(path: PathBuf) -> Config {
         Config {
             paths: vec![path],
-            max_sentence_words: 25,
-            max_paragraph_sentences: 6,
-            max_files: 10,
             max_file_bytes: 1_024,
-            max_depth: 4,
-            max_diagnostics: 100,
-            jobs: 1,
-            extensions: HashSet::from(["md".to_owned(), "txt".to_owned()]),
-            no_ignore: false,
-            format: Format::Text,
+            ..Config::default()
         }
     }
 
